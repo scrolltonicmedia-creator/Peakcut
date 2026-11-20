@@ -1055,6 +1055,28 @@ def bulk_delete(body: dict = Body(...)):
     return account.delete_many(vids, _pairs(body.get("clips")))
 
 
+@app.post("/api/compilations")
+def create_compilation(body: dict = Body(...)):
+    """Assemble selected finished clips into one 16:9 long-form video."""
+    _need_verified()
+    _quota()
+    _throttle("compilation:" + ctx.uid(), 12, 600, "You have started several long videos. Let one finish first.")
+    if body.get("rights_confirmed") is not True:
+        raise HTTPException(400, "Confirm that you own or have permission to use the selected footage.")
+    try:
+        target = int(body.get("target_minutes"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Choose a 10, 15 or 20 minute video.")
+    try:
+        with _create_lock:
+            _job_slots()
+            job = jobs.create_compilation(_pairs(body.get("clips"), 150), body.get("title"), target,
+                                          body.get("narration_plan"))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    return jobs.public(job)
+
+
 @app.get("/api/clips.zip")
 def clips_zip(ids: str = ""):
     """Many clips as one download. `ids` is video.clip pairs separated by commas."""

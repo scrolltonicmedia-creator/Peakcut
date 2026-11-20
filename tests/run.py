@@ -50,6 +50,7 @@ def main() -> int:
                 ("abuse and limits", ["tests/test_abuse.py", BASE, str(ROOT)]),
                 ("queue under load", ["tests/test_load_queue.py", str(ROOT)]),
                 ("a day-long video in little memory", ["tests/test_longvideo.py"]),
+                ("building a long-form compilation", ["tests/test_compilation.py"]),
                 ("deleting and bulk actions", ["tests/test_delete.py"]),
                 ("saving a video when Windows says busy", ["tests/test_jobsave.py"]),
                 ("your own big text on the clips", ["tests/test_bigtext.py"]),

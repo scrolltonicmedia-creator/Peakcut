@@ -1746,9 +1746,9 @@ function jobHtml(j) {
   if (j.status === "live") return liveHtml(j);
   const busy = j.status === "queued" || j.status === "running";
   const who = !creatorId() && j.creator ? S.creators.find(c => c.id === j.creator)?.name : "";
-  const meta = [who, j.uploader, j.duration ? fmt(j.duration) + " long" : "", j.clips.length ? j.clips.length + (j.clips.length === 1 ? " clip" : " clips") : "",
+  const meta = [who, j.kind === "compilation" ? "Long-form compilation" : "", j.uploader, j.duration ? fmt(j.duration) + " long" : "", j.clips.length ? j.clips.length + (j.clips.length === 1 ? " clip" : " clips") : "",
                 j.took ? "made in " + fmt(j.took) : "", j.kind === "live" ? "recording, " + j.stage.toLowerCase() : ""].filter(Boolean).map(esc).join(" · ");
-  const pic = j.thumb ? `<img src="/media/${esc(j.id)}/thumb.jpg" alt="" loading="lazy">` : ic(j.source?.type === "file" ? "film" : "link");
+  const pic = j.thumb ? `<img src="/media/${esc(j.id)}/thumb.jpg" alt="" loading="lazy">` : ic(j.source?.type === "file" || j.kind === "compilation" ? "film" : "link");
   return `<div class="job-head"><div class="jt"><span class="jthumb">${pic}${j.duration ? `<span class="du">${fmt(j.duration)}</span>` : ""}</span><div style="min-width:0"><h3>${esc(j.title || j.source.name)}</h3><p class="sub">${meta}</p></div></div>
       <div class="row" style="flex-wrap:nowrap;gap:4px">${busy ? "" : `
         ${j.clips.some(c => c.status === "done") ? `<button class="btn sm icon ghost" data-act="dlall" data-j="${j.id}" title="Download all clips of this video" aria-label="Download all clips of this video">${ic("down")}</button>` : ""}
@@ -1784,6 +1784,7 @@ function drawSelBar() {
   if (!n) return;
   put(bar, `<b>${n} selected</b>
     <button class="btn sm" data-act="selall">Select all</button>
+    <button class="btn sm primary" data-act="selcompile" ${dl >= 2 ? "" : "disabled"}>${ic("film")}Make long video</button>
     <button class="btn sm primary" data-act="seldl" ${dl ? "" : "disabled"}>${ic("down")}Download${dl ? ` ${dl} clip${dl === 1 ? "" : "s"}` : ""}</button>
     <button class="btn sm danger" data-act="seldel">${ic("trash")}Delete</button>
     <button class="btn sm" data-act="selclear">Cancel</button>`);
@@ -2179,7 +2180,8 @@ function updateClipLength() {
 function drawClipDlg(full) {
   const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid), dlg = $("#clipdlg");
   if (!c) { if (dlg.open) dlg.close(); return; }
-  const m = `/media/${j.id}/`, sig = c.status + c.version;
+  const m = `/media/${j.id}/`, sig = c.status + c.version, long = j.kind === "compilation";
+  const postAccounts = long ? S.accounts.filter(a => a.platform === "youtube") : S.accounts;
   const stage = c.status === "done" ? `<video src="${m}${esc(c.file)}?v=${c.version}" poster="${m}${esc(c.cover)}?v=${c.version}" controls autoplay playsinline></video>`
     : c.status === "error" ? `<div class="err" style="padding:20px;text-align:center">${esc(c.error || "Could not make this clip.")}</div>`
     : `<span class="making">${c.status === "rendering" ? "Making this clip…" : "Waiting its turn…"}</span>`;
@@ -2188,7 +2190,8 @@ function drawClipDlg(full) {
       <div class="panel">
         <div class="job-head" style="margin:0"><div><span class="badge ${scoreCls(c.score)}" style="position:static">${c.judges ? "Words " + c.judges.words + (c.judges.reaction ? " · Reaction " + c.judges.reaction : "") : c.score ? "Score " + c.score : "Clipped by hand"}</span>
           <p class="sub" style="margin-top:8px">${esc(c.reason || "")}</p></div><button class="btn icon ghost" data-act="closedlg" aria-label="Close">${ic("x")}</button></div>
-        <h3>On the video</h3>
+        ${long ? `<h3>Long-form video</h3><p class="help">PeakCut assembled the strongest moments in 16:9. Add your original narration before publishing so the finished video has your own story and point of view.</p><div class="err" style="background:var(--brand-soft);color:var(--text)"><b>Narration plan</b><br>${esc(j.narration_plan || "Add your own commentary before publishing.")}</div>` : ""}
+        <div ${long ? "hidden" : ""}><h3>On the video</h3>
         <label class="f">Big text<input data-f="hook" value="${esc(c.hook)}"></label>
         <label class="sw"><input type="checkbox" data-f="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
         <div class="two"><label class="f">Caption style<select data-f="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
@@ -2197,16 +2200,16 @@ function drawClipDlg(full) {
           <label class="f">End (seconds)<input data-f="end" type="number" step="0.5" value="${c.end}"></label></div>
         <div class="trim-tools"><div class="trim-head"><b id="trimlen">${Math.max(0, Number(c.end) - Number(c.start)).toFixed(1)} seconds</b><span class="sub" id="trimnote"></span></div>
           <div class="row"><button class="btn" data-act="trimend" data-sec="1">Cut 1s from end</button><button class="btn" data-act="trimend" data-sec="5">Cut 5s from end</button><button class="btn primary" id="trim60" data-act="trim60">Fit to 60s</button></div>
-          <small class="sub">Use Start above to cut the beginning. Then press Save and re-make clip.</small></div>
+          <small class="sub">Use Start above to cut the beginning. Then press Save and re-make clip.</small></div></div>
         <h3>Post text</h3>
         <label class="f">Title<input data-f="title" value="${esc(c.title)}"></label>
         <label class="f">Description<textarea data-f="description" rows="8" maxlength="2000">${esc(c.description)}</textarea></label>
         <label class="f">Hashtags<textarea data-f="hashtags" rows="3" maxlength="500" placeholder="#Shorts #Gaming">${esc((c.hashtags || []).map(h => "#" + h).join(" "))}</textarea></label>
         <button class="btn" data-act="rewritepost">${ic("bolt")}Rewrite title, description &amp; hashtags</button>
-        <button class="btn" data-act="remake">${ic("scissors")}Save and re-make clip</button>
+        ${long ? "" : `<button class="btn" data-act="remake">${ic("scissors")}Save and re-make clip</button>`}
         <h3>Post it</h3>
         <div id="dposts" class="row" style="gap:4px"></div>
-        ${S.accounts.length ? `<div class="row">${S.accounts.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>
+        ${postAccounts.length ? `<div class="row">${postAccounts.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>
           <div class="row"><button class="btn primary" data-act="postnow">${ic("send")}Post now</button><button class="btn" data-act="postqueue">Add to queue</button></div>`
           : `<p class="help">No accounts connected yet. Connect one in Settings.</p>`}
         <div class="row" style="margin-top:auto;padding-top:8px;border-top:1px solid var(--line)">
@@ -2402,6 +2405,29 @@ document.addEventListener("click", async e => {
     }
     if (a === "dlall") return zipDownload((jobOf(d.j)?.clips || []).filter(c => c.status === "done").map(c => d.j + "." + c.id));
     if (a === "seldl") return zipDownload(selClips());
+    if (a === "selcompile") {
+      const ids = selClips();
+      if (ids.length < 2) return toast("Select at least two finished clips.", "bad");
+      const pairs = ids.map(x => x.split(".", 2));
+      const seconds = pairs.reduce((n, [j, c]) => n + Math.max(0, Number(jobOf(j)?.clips.find(x => x.id === c)?.end || 0) - Number(jobOf(j)?.clips.find(x => x.id === c)?.start || 0)), 0);
+      const dlg = $("#formdlg");
+      dlg.innerHTML = `<form method="dialog" class="dlg"><h2>Make a long YouTube video</h2>
+        <p class="help">PeakCut will rank these ${ids.length} clips, keep the strongest moments up to your target, preserve their viewing order, and render one 16:9 video. You have about <b>${fmt(seconds)}</b> selected.</p>
+        <label class="f">Video title<input id="long_title" value="Best Moments Compilation" maxlength="100" required></label>
+        <label class="f">Target length<select id="long_target"><option value="10">10 minutes</option><option value="15">15 minutes</option><option value="20">20 minutes</option></select></label>
+        <label class="f">Your original narration / commentary plan<textarea id="long_plan" rows="5" minlength="20" maxlength="2000" required placeholder="Example: I will introduce the challenge, explain why each decision worked or failed, and add my own reaction between moments."></textarea></label>
+        <p class="help">The plan stays with the project. Record or add this narration before publishing; stitching clips together alone does not remove copyright or guarantee monetization.</p>
+        <label class="ck"><input id="long_rights" type="checkbox" required>I own this footage or have permission to use and publish it.</label>
+        <div class="dlg-foot"><button class="btn" value="no" formnovalidate>Cancel</button><button class="btn primary" value="yes">Start long video</button></div></form>`;
+      dlg.onclose = async () => {
+        if (dlg.returnValue !== "yes") return;
+        try {
+          const job = await send("/api/compilations", {clips:pairs, title:$("#long_title").value, target_minutes:Number($("#long_target").value), narration_plan:$("#long_plan").value, rights_confirmed:$("#long_rights").checked});
+          sel().clear(); S.jobs.unshift(job); render(); toast("Long video started. It will appear here when ready.", "ok"); await tick();
+        } catch (err) { toast(err.message, "bad"); }
+      };
+      dlg.returnValue = "no"; dlg.showModal(); return;
+    }
     if (a === "selclear") { sel().clear(); return render(); }
     if (a === "selall") {
       const cid = creatorId();

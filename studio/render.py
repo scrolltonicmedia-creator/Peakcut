@@ -282,6 +282,59 @@ _qsv_ok = None
 RENDER_SECONDS = 600      # one clip's video encode; far beyond normal, so a frozen encoder is stopped, not waited on
 
 
+def render_compilation(items: list, out_dir: Path, name: str, target_seconds: float, progress=None) -> dict:
+    """Turn finished vertical clips into one 16:9 long-form video.
+
+    Each piece is normalised separately before concatenating it.  That is deliberately less clever than one huge
+    ffmpeg filter graph: it works with clips made by different PeakCut versions, and keeps Windows command lines
+    short when somebody selects dozens of moments.
+    """
+    if not items:
+        raise ValueError("Choose at least one finished clip.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="pklong"))
+    made, elapsed = [], 0.0
+    try:
+        for i, item in enumerate(items):
+            left = max(0.0, float(target_seconds) - elapsed)
+            if left < 0.25:
+                break
+            duration = min(float(item["duration"]), left)
+            if duration < 0.25:
+                continue
+            seg = work / f"s{i:03d}.mp4"
+            # A blurred copy fills 16:9, while the complete clip stays sharp and centred.  Existing captions and
+            # the ScrollTonic watermark remain part of the foreground clip.
+            fc = ("[0:v]split=2[bg0][fg0];"
+                  "[bg0]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,boxblur=20:2[bg];"
+                  "[fg0]scale=1280:720:force_original_aspect_ratio=decrease[fg];"
+                  "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p,setpts=PTS-STARTPTS[v]")
+            run(["ffmpeg", "-y", "-v", "error", "-i", str(item["path"]), "-t", f"{duration:.3f}",
+                 "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-r", "30", "-c:v", "libx264",
+                 "-crf", "21", "-preset", "veryfast", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,asetpts=PTS-STARTPTS",
+                 "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(seg)],
+                timeout=max(RENDER_SECONDS, int(duration * 8)))
+            made.append(seg)
+            elapsed += duration
+            if progress:
+                progress(len(made), len(items), elapsed)
+        if not made:
+            raise RuntimeError("None of the selected clips could be added.")
+        listing = work / "parts.txt"
+        listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in made), encoding="utf-8")
+        merged = work / f"{name}.mp4"
+        run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
+             "-c", "copy", "-movflags", "+faststart", str(merged)], timeout=max(600, int(elapsed * 2)))
+        cover = work / f"{name}.jpg"
+        run(["ffmpeg", "-y", "-v", "error", "-ss", f"{min(3.0, elapsed / 3):.2f}", "-i", str(merged),
+             "-frames:v", "1", "-q:v", "3", str(cover)])
+        shutil.move(str(merged), out_dir / merged.name)
+        shutil.move(str(cover), out_dir / cover.name)
+        return {"file": merged.name, "cover": cover.name, "duration": round(elapsed, 2), "layout": "longform"}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, src_w: int, src_h: int) -> dict:
     """Writes <name>.mp4, <name>.jpg and <name>.ass into out_dir. Returns file names."""
     out_dir.mkdir(parents=True, exist_ok=True)

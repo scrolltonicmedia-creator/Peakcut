@@ -150,7 +150,7 @@ def job_dir(jid) -> Path:
     return Path(_jobs[jid]["dir"])
 
 
-HIDDEN = ("dir", "user", "source_path", "recover")
+HIDDEN = ("dir", "user", "source_path", "recover", "compilation_items")
 
 
 def public(job) -> dict:
@@ -292,11 +292,11 @@ def get(jid):
 
 def busy_count() -> int:
     u = ctx.uid()
-    return sum(1 for j in list(_by_user.get(u, {}).values()) if j["kind"] == "video" and j["status"] in ("queued", "running"))
+    return sum(1 for j in list(_by_user.get(u, {}).values()) if j["kind"] in ("video", "compilation") and j["status"] in ("queued", "running"))
 
 
 def waiting_total() -> int:
-    return sum(1 for j in list(_jobs.values()) if j["kind"] == "video" and j["status"] == "queued")
+    return sum(1 for j in list(_jobs.values()) if j["kind"] in ("video", "compilation") and j["status"] == "queued")
 
 
 def queue_epoch() -> int:
@@ -336,7 +336,65 @@ def create(source: dict, options: dict, enqueue=True, creator=None, kind="video"
 
 def enqueue(job):
     save(job)
-    _q.put(("job", job["id"], None), user=job["user"])
+    kind = "compilation" if job.get("kind") == "compilation" else "job"
+    _q.put((kind, job["id"], None), user=job["user"])
+
+
+def create_compilation(pairs: list, title: str, target_minutes: int, narration_plan: str, enqueue_now=True) -> dict:
+    """Create one horizontal long-form video from the strongest selected finished clips."""
+    title = re.sub(r"\s+", " ", str(title or "")).strip()[:100]
+    plan = str(narration_plan or "").strip()[:2000]
+    if not title:
+        raise ValueError("Give the long video a title.")
+    if target_minutes not in (10, 15, 20):
+        raise ValueError("Choose a 10, 15 or 20 minute video.")
+    if len(plan) < 20:
+        raise ValueError("Add a short original narration or commentary plan first.")
+    candidates, seen = [], set()
+    for order, pair in enumerate(pairs if isinstance(pairs, list) else []):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        jid, cid = str(pair[0]), str(pair[1])
+        if (jid, cid) in seen:
+            continue
+        seen.add((jid, cid))
+        source_job = get(jid)
+        if not source_job or source_job.get("kind") == "compilation":
+            continue
+        clip = next((c for c in source_job.get("clips", []) if c.get("id") == cid and c.get("status") == "done"), None)
+        path = Path(source_job["dir"]) / "clips" / Path(str((clip or {}).get("file") or "")).name
+        duration = max(0.0, float((clip or {}).get("end", 0)) - float((clip or {}).get("start", 0)))
+        if not clip or not path.is_file() or duration < 0.25:
+            continue
+        candidates.append({"job": jid, "clip": cid, "score": float(clip.get("score") or 0),
+                           "duration": duration, "order": order, "creator": source_job.get("creator")})
+    if len(candidates) < 2:
+        raise ValueError("Choose at least two finished clips.")
+    target = target_minutes * 60.0
+    ranked, chosen, total = sorted(candidates, key=lambda x: (-x["score"], x["order"])), [], 0.0
+    for item in ranked:
+        chosen.append(item)
+        total += item["duration"]
+        if total >= target:
+            break
+    chosen.sort(key=lambda x: x["order"])
+    creators_used = {x["creator"] for x in chosen}
+    creator = next(iter(creators_used)) if len(creators_used) == 1 else None
+    job = create({"type": "compilation", "name": title, "count": len(chosen)}, {}, enqueue=False,
+                 creator=creator, kind="compilation")
+    expected = min(total, target)
+    score = round(sum(x["score"] for x in chosen) / len(chosen))
+    job.update(compilation_items=[[x["job"], x["clip"]] for x in chosen], target_seconds=target,
+               narration_plan=plan, duration=expected, title=title, stage="Waiting to assemble long video")
+    job["clips"] = [{"id": "longform", "start": 0.0, "end": expected, "status": "queued", "score": score,
+                     "hook": "BEST MOMENTS", "title": title,
+                     "description": "A hand-picked long-form collection of the strongest moments, shaped around original ScrollTonic commentary.",
+                     "hashtags": ["ScrollTonic", "BestMoments", "Compilation", "Gaming"], "captions": False,
+                     "style": "clean", "layout": "longform", "reason": f"The strongest {len(chosen)} selected moments, ready for your original narration."}]
+    save(job)
+    if enqueue_now:
+        _q.put(("compilation", job["id"], None), user=job["user"])
+    return job
 
 
 def submit(fn):
@@ -916,6 +974,45 @@ def _run_job(job):
     creators.log(job["creator"], f"Video finished with {len(clips)} clips in {round(time.time() - t0)}s: {job['title']}")
 
 
+def _run_compilation(job):
+    """Resolve the selected clips at render time and assemble them as one horizontal video."""
+    began = time.time()
+    clip = job["clips"][0]
+    clip.update(status="rendering", error=None)
+    _set(job, status="running", stage="Preparing the selected moments", progress=0.02, error=None)
+    items = []
+    for jid, cid in job.get("compilation_items", []):
+        source_job = _jobs.get(jid)
+        if not source_job or source_job.get("user") != job.get("user"):
+            continue
+        source_clip = next((c for c in source_job.get("clips", []) if c.get("id") == cid and c.get("status") == "done"), None)
+        path = Path(source_job["dir"]) / "clips" / Path(str((source_clip or {}).get("file") or "")).name
+        duration = max(0.0, float((source_clip or {}).get("end", 0)) - float((source_clip or {}).get("start", 0)))
+        if source_clip and path.is_file() and duration >= 0.25:
+            items.append({"path": path, "duration": duration})
+    if len(items) < 2:
+        raise RuntimeError("The selected clips are no longer available. Select the finished clips again.")
+
+    def progress(done, total, elapsed):
+        job.update(stage=f"Building long video: moment {done} of {total}",
+                   progress=min(0.94, 0.05 + 0.86 * done / max(1, total)))
+        save(job)
+
+    result = render.render_compilation(items, Path(job["dir"]) / "clips", clip["id"],
+                                       float(job.get("target_seconds") or 600), progress)
+    duration = result.pop("duration")
+    clip.update(result, start=0.0, end=duration, status="done", version=clip.get("version", 0) + 1,
+                error=None, made_at=time.time())
+    _write_post_text(job, clip)
+    _set(job, status="done", stage="Long video ready — add the planned narration before publishing", progress=1.0,
+         duration=duration, took=round(time.time() - began))
+    try:
+        from . import notices
+        notices.add(job.get("user"), "clips", "Long video ready", job.get("title") or "Your compilation", "/app/videos")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _worker(quick_only=False):
     while True:
         kind, a, cid = _q.get(quick_only)
@@ -927,13 +1024,15 @@ def _worker(quick_only=False):
             continue
         job = _jobs.get(a)
         if not job:
-            if kind == "job":
+            if kind in ("job", "compilation"):
                 _q.done()
             continue
         token = ctx._uid.set(job["user"])  # everything this job does runs as its owner
         try:
             if kind == "job":
                 _run_job(job)
+            elif kind == "compilation":
+                _run_compilation(job)
             else:
                 clip = next(c for c in job["clips"] if c["id"] == cid)
                 words = []
@@ -942,7 +1041,7 @@ def _worker(quick_only=False):
                 render_one(job, clip, words)
         except Exception as e:  # noqa: BLE001
             (Path(job["dir"]) / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
-            if kind == "job":
+            if kind in ("job", "compilation"):
                 for c in job["clips"]:
                     if c.get("status") in ("queued", "rendering"):
                         c.update(status="error", error="The video stopped before this clip was made.")
@@ -950,7 +1049,7 @@ def _worker(quick_only=False):
                 creators.log(job["creator"], f"Video failed: {safe.friendly(e)[:200]}")
         finally:
             ctx._uid.reset(token)
-            if kind == "job":
+            if kind in ("job", "compilation"):
                 _q.done()
 
 
@@ -958,7 +1057,8 @@ def _pick_up_after_restart():
     """Videos and single clips that were being made when the server stopped: queued again, oldest first."""
     waiting = sorted((j for j in all_jobs() if j.get("status") == "queued" and j.get("resume")), key=lambda j: j["created"])
     for j in waiting:
-        _q.put(("job", j["id"], None), user=j["user"])
+        kind = "compilation" if j.get("kind") == "compilation" else "job"
+        _q.put((kind, j["id"], None), user=j["user"])
     for j in all_jobs():
         for cid in j.pop("remake", []):
             _q.put(("clip", j["id"], cid))
