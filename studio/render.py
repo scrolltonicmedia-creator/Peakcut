@@ -283,11 +283,11 @@ RENDER_SECONDS = 600      # one clip's video encode; far beyond normal, so a fro
 
 
 def render_compilation(items: list, out_dir: Path, name: str, target_seconds: float, progress=None) -> dict:
-    """Turn finished vertical clips into one 16:9 long-form video.
+    """Cut the chosen sections from full source videos and turn them into one 16:9 long-form video.
 
-    Each piece is normalised separately before concatenating it.  That is deliberately less clever than one huge
-    ffmpeg filter graph: it works with clips made by different PeakCut versions, and keeps Windows command lines
-    short when somebody selects dozens of moments.
+    Each section is normalised separately before concatenating it.  That is deliberately less clever than one huge
+    ffmpeg filter graph: it works with source videos in different shapes and formats, and keeps Windows command
+    lines short when somebody selects dozens of moments.
     """
     if not items:
         raise ValueError("Choose at least one finished clip.")
@@ -303,16 +303,26 @@ def render_compilation(items: list, out_dir: Path, name: str, target_seconds: fl
             if duration < 0.25:
                 continue
             seg = work / f"s{i:03d}.mp4"
-            # A blurred copy fills 16:9, while the complete clip stays sharp and centred.  Existing captions and
-            # the ScrollTonic watermark remain part of the foreground clip.
-            fc = ("[0:v]split=2[bg0][fg0];"
+            # A blurred copy fills 16:9, while the complete original picture stays sharp and centred.
+            base_fc = ("[0:v]split=2[bg0][fg0];"
                   "[bg0]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,boxblur=20:2[bg];"
                   "[fg0]scale=1280:720:force_original_aspect_ratio=decrease[fg];"
-                  "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p,setpts=PTS-STARTPTS[v]")
-            run(["ffmpeg", "-y", "-v", "error", "-i", str(item["path"]), "-t", f"{duration:.3f}",
-                 "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-r", "30", "-c:v", "libx264",
+                  "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p,setpts=PTS-STARTPTS[base]")
+            watermark = config.WATERMARK_FILE if config.WATERMARK_FILE.is_file() else None
+            if watermark:
+                wm_width = max(40, min(180, config.WATERMARK_WIDTH))
+                fc = (base_fc + f";[1:v]format=rgba,colorchannelmixer=aa={config.WATERMARK_OPACITY:.3f},scale={wm_width}:-1[wm];"
+                      f"[base][wm]overlay=W-w-{config.WATERMARK_MARGIN}:H-h-{config.WATERMARK_MARGIN}:shortest=1[v]")
+            else:
+                fc = base_fc + ";[base]null[v]"
+            cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{float(item.get('start', 0)):.3f}", "-i", str(item["path"])]
+            if watermark:
+                cmd += ["-loop", "1", "-i", str(watermark)]
+            cmd += ["-t", f"{duration:.3f}", "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0",
+                 "-r", "30", "-c:v", "libx264",
                  "-crf", "21", "-preset", "veryfast", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,asetpts=PTS-STARTPTS",
-                 "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(seg)],
+                 "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(seg)]
+            run(cmd,
                 timeout=max(RENDER_SECONDS, int(duration * 8)))
             made.append(seg)
             elapsed += duration

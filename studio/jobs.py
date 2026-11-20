@@ -340,8 +340,8 @@ def enqueue(job):
     _q.put((kind, job["id"], None), user=job["user"])
 
 
-def create_compilation(pairs: list, title: str, target_minutes: int, narration_plan: str, enqueue_now=True) -> dict:
-    """Create one horizontal long-form video from the strongest selected finished clips."""
+def create_compilation(video_ids: list, title: str, target_minutes: int, narration_plan: str, enqueue_now=True) -> dict:
+    """Create one horizontal long-form video from the best original sections of several source videos."""
     title = re.sub(r"\s+", " ", str(title or "")).strip()[:100]
     plan = str(narration_plan or "").strip()[:2000]
     if not title:
@@ -350,26 +350,29 @@ def create_compilation(pairs: list, title: str, target_minutes: int, narration_p
         raise ValueError("Choose a 10, 15 or 20 minute video.")
     if len(plan) < 20:
         raise ValueError("Add a short original narration or commentary plan first.")
-    candidates, seen = [], set()
-    for order, pair in enumerate(pairs if isinstance(pairs, list) else []):
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            continue
-        jid, cid = str(pair[0]), str(pair[1])
-        if (jid, cid) in seen:
-            continue
-        seen.add((jid, cid))
+    ids = list(dict.fromkeys(str(x) for x in (video_ids if isinstance(video_ids, list) else []) if isinstance(x, str)))
+    if not 2 <= len(ids) <= 12:
+        raise ValueError("Choose between 2 and 12 finished source videos.")
+    candidates, usable_videos = [], []
+    for video_order, jid in enumerate(ids):
         source_job = get(jid)
-        if not source_job or source_job.get("kind") == "compilation":
+        if not source_job or source_job.get("kind") != "video" or source_job.get("status") != "done":
             continue
-        clip = next((c for c in source_job.get("clips", []) if c.get("id") == cid and c.get("status") == "done"), None)
-        path = Path(source_job["dir"]) / "clips" / Path(str((clip or {}).get("file") or "")).name
-        duration = max(0.0, float((clip or {}).get("end", 0)) - float((clip or {}).get("start", 0)))
-        if not clip or not path.is_file() or duration < 0.25:
-            continue
-        candidates.append({"job": jid, "clip": cid, "score": float(clip.get("score") or 0),
-                           "duration": duration, "order": order, "creator": source_job.get("creator")})
-    if len(candidates) < 2:
-        raise ValueError("Choose at least two finished clips.")
+        before = len(candidates)
+        for clip_order, clip in enumerate(sorted(source_job.get("clips", []), key=lambda c: float(c.get("start", 0)))):
+            if clip.get("status") != "done":
+                continue
+            path = Path(clip["src"]) if clip.get("src") else Path(str(source_job.get("source_path") or ""))
+            duration = max(0.0, float(clip.get("end", 0)) - float(clip.get("start", 0)))
+            if not path.is_file() or duration < 0.25:
+                continue
+            candidates.append({"job": jid, "clip": str(clip.get("id")), "score": float(clip.get("score") or 0),
+                               "duration": duration, "order": (video_order, float(clip.get("start", 0)), clip_order),
+                               "creator": source_job.get("creator")})
+        if len(candidates) > before:
+            usable_videos.append(jid)
+    if len(usable_videos) < 2:
+        raise ValueError("At least two selected videos need finished AI moments and their original footage.")
     target = target_minutes * 60.0
     ranked, chosen, total = sorted(candidates, key=lambda x: (-x["score"], x["order"])), [], 0.0
     for item in ranked:
@@ -380,7 +383,7 @@ def create_compilation(pairs: list, title: str, target_minutes: int, narration_p
     chosen.sort(key=lambda x: x["order"])
     creators_used = {x["creator"] for x in chosen}
     creator = next(iter(creators_used)) if len(creators_used) == 1 else None
-    job = create({"type": "compilation", "name": title, "count": len(chosen)}, {}, enqueue=False,
+    job = create({"type": "compilation", "name": title, "count": len(usable_videos)}, {}, enqueue=False,
                  creator=creator, kind="compilation")
     expected = min(total, target)
     score = round(sum(x["score"] for x in chosen) / len(chosen))
@@ -388,9 +391,9 @@ def create_compilation(pairs: list, title: str, target_minutes: int, narration_p
                narration_plan=plan, duration=expected, title=title, stage="Waiting to assemble long video")
     job["clips"] = [{"id": "longform", "start": 0.0, "end": expected, "status": "queued", "score": score,
                      "hook": "BEST MOMENTS", "title": title,
-                     "description": "A hand-picked long-form collection of the strongest moments, shaped around original ScrollTonic commentary.",
+                     "description": "The strongest moments selected from multiple full videos and shaped into one long-form ScrollTonic story.",
                      "hashtags": ["ScrollTonic", "BestMoments", "Compilation", "Gaming"], "captions": False,
-                     "style": "clean", "layout": "longform", "reason": f"The strongest {len(chosen)} selected moments, ready for your original narration."}]
+                     "style": "clean", "layout": "longform", "reason": f"The strongest {len(chosen)} moments from {len(usable_videos)} full videos, ready for your original narration."}]
     save(job)
     if enqueue_now:
         _q.put(("compilation", job["id"], None), user=job["user"])
@@ -975,7 +978,7 @@ def _run_job(job):
 
 
 def _run_compilation(job):
-    """Resolve the selected clips at render time and assemble them as one horizontal video."""
+    """Cut the chosen moments from their original videos and assemble one horizontal video."""
     began = time.time()
     clip = job["clips"][0]
     clip.update(status="rendering", error=None)
@@ -986,12 +989,14 @@ def _run_compilation(job):
         if not source_job or source_job.get("user") != job.get("user"):
             continue
         source_clip = next((c for c in source_job.get("clips", []) if c.get("id") == cid and c.get("status") == "done"), None)
-        path = Path(source_job["dir"]) / "clips" / Path(str((source_clip or {}).get("file") or "")).name
+        path = Path(source_clip["src"]) if (source_clip or {}).get("src") else Path(str(source_job.get("source_path") or ""))
+        offset = float((source_clip or {}).get("src_offset", 0))
+        start = max(0.0, float((source_clip or {}).get("start", 0)) - offset)
         duration = max(0.0, float((source_clip or {}).get("end", 0)) - float((source_clip or {}).get("start", 0)))
         if source_clip and path.is_file() and duration >= 0.25:
-            items.append({"path": path, "duration": duration})
+            items.append({"path": path, "start": start, "duration": duration})
     if len(items) < 2:
-        raise RuntimeError("The selected clips are no longer available. Select the finished clips again.")
+        raise RuntimeError("The original videos are no longer available. Select the finished source videos again.")
 
     def progress(done, total, elapsed):
         job.update(stage=f"Building long video: moment {done} of {total}",

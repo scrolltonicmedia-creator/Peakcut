@@ -1753,7 +1753,7 @@ function jobHtml(j) {
       <div class="row" style="flex-wrap:nowrap;gap:4px">${busy ? "" : `
         ${j.clips.some(c => c.status === "done") ? `<button class="btn sm icon ghost" data-act="dlall" data-j="${j.id}" title="Download all clips of this video" aria-label="Download all clips of this video">${ic("down")}</button>` : ""}
         <button class="btn sm icon ghost" data-act="deljob" data-j="${j.id}" title="Delete" aria-label="Delete this video and its clips">${ic("trash")}</button>
-        <label class="selck" title="Select this video and its clips"><input type="checkbox" data-sel="j:${j.id}" ${sel().has("j:" + j.id) ? "checked" : ""} aria-label="Select this video"></label>`}</div></div>
+        <label class="selck" title="Select this full source video"><input type="checkbox" data-sel="j:${j.id}" ${sel().has("j:" + j.id) ? "checked" : ""} aria-label="Select this full source video"></label>`}</div></div>
     ${busy ? `<div class="bar"><i style="width:${Math.round(j.progress * 100)}%"></i></div><p class="sub">${esc(j.stage)} · ${Math.round(j.progress * 100)}%</p>` : ""}
     ${j.status === "done" && !j.clips.length ? `<p class="sub">${esc(j.stage)}</p>` : ""}
     ${j.error ? `<div class="err">${esc(j.error)}<button class="rep" data-act="report" data-ctx="${esc("Video failed: " + (j.title || j.source.name || "") + " | " + j.error)}">Report this</button></div>` : ""}${j.ai?.note ? `<p class="sub">${esc(j.ai.note)}</p>` : ""}
@@ -1772,6 +1772,10 @@ function selClips() {          // every finished clip the selection covers, for 
   clipsSel.forEach(([j, c]) => { if (jobOf(j)?.clips.find(x => x.id === c)?.status === "done") out.set(j + "." + c, 1); });
   return [...out.keys()];
 }
+function selVideos() {         // finished full videos whose original footage and AI moments are ready
+  const {jobsSel} = selParts();
+  return jobsSel.filter(id => { const j = jobOf(id); return j?.kind === "video" && j.status === "done" && j.clips.some(c => c.status === "done"); });
+}
 function drawSelBar() {
   let bar = $("#selbar");
   if (!bar) { bar = document.createElement("div"); bar.id = "selbar"; bar.setAttribute("role", "toolbar"); bar.setAttribute("aria-label", "Selected items"); document.body.append(bar); }
@@ -1779,12 +1783,12 @@ function drawSelBar() {
     const p = k.split(":"), j = jobOf(p[1]);
     if (!j || (p[0] === "c" && !j.clips.some(c => c.id === p[2]))) sel().delete(k);
   }
-  const n = sel().size, dl = selClips().length, shown = $("#jobs");
+  const n = sel().size, dl = selClips().length, videos = selVideos().length, shown = $("#jobs");
   bar.classList.toggle("on", n > 0 && !!shown);
   if (!n) return;
   put(bar, `<b>${n} selected</b>
     <button class="btn sm" data-act="selall">Select all</button>
-    <button class="btn sm primary" data-act="selcompile" ${dl >= 2 ? "" : "disabled"}>${ic("film")}Make long video</button>
+    <button class="btn sm primary" data-act="selcompile" ${videos >= 2 ? "" : "disabled"}>${ic("film")}Make long video${videos ? ` from ${videos}` : ""}</button>
     <button class="btn sm primary" data-act="seldl" ${dl ? "" : "disabled"}>${ic("down")}Download${dl ? ` ${dl} clip${dl === 1 ? "" : "s"}` : ""}</button>
     <button class="btn sm danger" data-act="seldel">${ic("trash")}Delete</button>
     <button class="btn sm" data-act="selclear">Cancel</button>`);
@@ -2406,13 +2410,13 @@ document.addEventListener("click", async e => {
     if (a === "dlall") return zipDownload((jobOf(d.j)?.clips || []).filter(c => c.status === "done").map(c => d.j + "." + c.id));
     if (a === "seldl") return zipDownload(selClips());
     if (a === "selcompile") {
-      const ids = selClips();
-      if (ids.length < 2) return toast("Select at least two finished clips.", "bad");
-      const pairs = ids.map(x => x.split(".", 2));
-      const seconds = pairs.reduce((n, [j, c]) => n + Math.max(0, Number(jobOf(j)?.clips.find(x => x.id === c)?.end || 0) - Number(jobOf(j)?.clips.find(x => x.id === c)?.start || 0)), 0);
+      const ids = selVideos();
+      if (ids.length < 2) return toast("Select at least two finished full videos using the checkbox beside each video.", "bad");
+      if (ids.length > 12) return toast("Choose up to 12 source videos for one long video.", "bad");
+      const seconds = ids.reduce((n, id) => n + (jobOf(id)?.clips || []).filter(c => c.status === "done").reduce((m, c) => m + Math.max(0, Number(c.end || 0) - Number(c.start || 0)), 0), 0);
       const dlg = $("#formdlg");
       dlg.innerHTML = `<form method="dialog" class="dlg"><h2>Make a long YouTube video</h2>
-        <p class="help">PeakCut will rank these ${ids.length} clips, keep the strongest moments up to your target, preserve their viewing order, and render one 16:9 video. You have about <b>${fmt(seconds)}</b> selected.</p>
+        <p class="help">PeakCut will use these ${ids.length} full source videos, rank all their AI-found moments, cut the strongest sections directly from the original footage, and render one 16:9 video. About <b>${fmt(seconds)}</b> of strong moments are available.</p>
         <label class="f">Video title<input id="long_title" value="Best Moments Compilation" maxlength="100" required></label>
         <label class="f">Target length<select id="long_target"><option value="10">10 minutes</option><option value="15">15 minutes</option><option value="20">20 minutes</option></select></label>
         <label class="f">Your original narration / commentary plan<textarea id="long_plan" rows="5" minlength="20" maxlength="2000" required placeholder="Example: I will introduce the challenge, explain why each decision worked or failed, and add my own reaction between moments."></textarea></label>
@@ -2422,7 +2426,7 @@ document.addEventListener("click", async e => {
       dlg.onclose = async () => {
         if (dlg.returnValue !== "yes") return;
         try {
-          const job = await send("/api/compilations", {clips:pairs, title:$("#long_title").value, target_minutes:Number($("#long_target").value), narration_plan:$("#long_plan").value, rights_confirmed:$("#long_rights").checked});
+          const job = await send("/api/compilations", {videos:ids, title:$("#long_title").value, target_minutes:Number($("#long_target").value), narration_plan:$("#long_plan").value, rights_confirmed:$("#long_rights").checked});
           sel().clear(); S.jobs.unshift(job); render(); toast("Long video started. It will appear here when ready.", "ok"); await tick();
         } catch (err) { toast(err.message, "bad"); }
       };

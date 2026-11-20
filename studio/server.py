@@ -1057,7 +1057,7 @@ def bulk_delete(body: dict = Body(...)):
 
 @app.post("/api/compilations")
 def create_compilation(body: dict = Body(...)):
-    """Assemble selected finished clips into one 16:9 long-form video."""
+    """Find the best original sections of selected source videos and assemble one 16:9 video."""
     _need_verified()
     _quota()
     _throttle("compilation:" + ctx.uid(), 12, 600, "You have started several long videos. Let one finish first.")
@@ -1068,9 +1068,13 @@ def create_compilation(body: dict = Body(...)):
     except (TypeError, ValueError):
         raise HTTPException(400, "Choose a 10, 15 or 20 minute video.")
     try:
+        raw = body.get("videos") if isinstance(body.get("videos"), list) else []
+        vids = list(dict.fromkeys(x for x in raw if isinstance(x, str) and re.fullmatch(r"[\w\-]{8,60}", x)))
+        if len(raw) != len(vids):
+            raise ValueError("Choose each source video once.")
         with _create_lock:
             _job_slots()
-            job = jobs.create_compilation(_pairs(body.get("clips"), 150), body.get("title"), target,
+            job = jobs.create_compilation(vids, body.get("title"), target,
                                           body.get("narration_plan"))
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
