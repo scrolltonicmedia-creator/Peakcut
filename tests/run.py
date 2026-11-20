@@ -65,6 +65,7 @@ def main() -> int:
                 ("captions never overlap, stuck clips, sentence endings", ["tests/test_stuck.py"]),
                 ("ad breaks and frozen screens", ["tests/test_static.py"]),
                 ("answers that are not quite right", ["tests/test_answer.py"]),
+                ("waiting out AI rate limits", ["tests/test_retry.py"]),
                 ("knowing which game a stream is", ["tests/test_games.py"]),
                 ("finding the facecam in a gaming stream", ["tests/test_facecam.py"]),
                 ("visible emotion and creator clipping direction", ["tests/test_vision.py"]),

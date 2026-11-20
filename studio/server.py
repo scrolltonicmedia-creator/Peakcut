@@ -826,13 +826,35 @@ def _up_root() -> Path:
     return d
 
 
+UP_IDLE_SEC = 15 * 60     # an upload of your own that hasn't moved for this long was left behind (tab closed, page reloaded)
+
+
+def _up_active(d: Path) -> float:
+    """When this upload last moved: its folder, or any piece in it (a piece being sent grows as it arrives)."""
+    newest = d.stat().st_mtime
+    for f in d.iterdir():
+        try:
+            newest = max(newest, f.stat().st_mtime)
+        except OSError:
+            pass
+    return newest
+
+
 def _up_sweep():
-    """Forget uploads that were started and never finished (after six hours)."""
+    """Forget uploads that were started and never finished: anyone's after six hours, and the asker's own once
+    they have stood still for UP_IDLE_SEC. An upload cut short by closing the tab or reloading the page never
+    says it stopped, and it must not keep counting against the limit of uploads at once."""
+    me = ctx.uid()
     for d in _up_root().glob("up-*"):
         try:
-            if d.is_dir() and time.time() - d.stat().st_mtime > 6 * 3600:
+            if not d.is_dir():
+                continue
+            idle = time.time() - _up_active(d)
+            if idle > 6 * 3600:
                 shutil.rmtree(d, ignore_errors=True)
-        except OSError:
+            elif idle > UP_IDLE_SEC and json.loads((d / "meta.json").read_text(encoding="utf-8")).get("user") == me:
+                shutil.rmtree(d, ignore_errors=True)
+        except (OSError, ValueError):
             pass
 
 
