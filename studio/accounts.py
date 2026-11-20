@@ -119,7 +119,7 @@ def apps_public() -> dict:
     for platform, name in APP_FOR.items():
         cid, secret = app_keys(name)
         out[platform] = {"ready": bool(cid and secret), "id_label": APPS[name][0], "secret_label": APPS[name][1],
-                         "id_hint": cid[:6] + "…" if len(cid) > 10 else cid, "redirect": redirect_for(platform),
+                         "id_hint": cid[:6] + "..." if len(cid) > 10 else cid, "redirect": redirect_for(platform),
                          "https": config.PUBLIC_URL.startswith("https://"),
                          "from_dashboard": bool((_apps_saved().get(name) or {}).get("id"))}
     return out

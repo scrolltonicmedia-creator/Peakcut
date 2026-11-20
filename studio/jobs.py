@@ -4,6 +4,7 @@ import json
 import os
 import math
 import queue
+import re
 import shutil
 import threading
 import time
@@ -11,7 +12,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from . import brain, config, creators, ctx, facecam, games, load, media, quality, render, roman, safe, transcribe, usage
+from . import ai, brain, config, creators, ctx, facecam, games, load, media, quality, render, roman, safe, transcribe, usage, vision
 
 class _FairQueue:
     """Whose video is next. Each person has their own line and the lines take turns, so someone who adds ten
@@ -296,7 +297,8 @@ def create(source: dict, options: dict, enqueue=True, creator=None, kind="video"
         opts["min_len"] = max(5, opts["max_len"] - 5)
     job = {"id": jid, "user": ctx.uid(), "kind": kind, "creator": creator, "dir": str(d), "created": time.time(), "source": source,
            "options": opts, "status": "queued", "stage": "Waiting", "progress": 0.0,
-           "title": source.get("name", ""), "uploader": "", "duration": 0, "clips": [], "error": None, "ai": {}}
+           "title": source.get("name", ""), "uploader": "", "duration": 0, "clips": [], "error": None, "ai": {},
+           "direction": (c or {}).get("clip_prompt", "")}
     d.mkdir(parents=True)
     with _lock:
         _jobs[jid] = job
@@ -361,6 +363,10 @@ def request_render(jid, cid, changes: dict):
     for k in ("hook", "title", "description", "style", "layout"):
         if k in changes:
             new[k] = str(changes[k])[:{"hook": 60, "title": 100, "description": 2000}.get(k, 20)]
+    if "hashtags" in changes:
+        raw = changes["hashtags"] if isinstance(changes["hashtags"], list) else re.split(r"[\s,]+", str(changes["hashtags"]))
+        tags = [re.sub(r"\W", "", str(tag).lstrip("#"))[:30] for tag in raw]
+        new["hashtags"] = list(dict.fromkeys(tag for tag in tags if tag))[:15]
     if new.get("style") not in render.STYLES:
         new["style"] = DEFAULTS["style"]
     if new.get("layout") not in render.LAYOUTS:
@@ -368,6 +374,54 @@ def request_render(jid, cid, changes: dict):
     clip.update(new, status="queued")
     save(job)
     _q.put(("clip", jid, cid))
+
+
+def _write_post_text(job, clip):
+    """Keep the JSON beside a finished clip in step with what the editor shows."""
+    post = {k: clip.get(k) for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
+    (Path(job["dir"]) / "clips" / f"{clip['id']}.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
+
+
+def rewrite_post(jid, cid):
+    """Rewrite an existing clip's social post fields from its saved transcript, without rendering the video."""
+    job = get(jid)
+    if not job:
+        raise KeyError("No such video")
+    clip = next((c for c in job.get("clips", []) if c.get("id") == cid), None)
+    if not clip:
+        raise KeyError("No such clip")
+    words_file = Path(job["dir"]) / "words.json"
+    try:
+        words = json.loads(words_file.read_text(encoding="utf-8")) if words_file.is_file() else []
+    except (OSError, ValueError):
+        words = []
+    if not words and clip.get("fixed_words"):
+        words = clip["fixed_words"]
+    near = [w for w in words if clip["start"] - 1 <= float(w.get("s", -1)) <= clip["end"] + 1]
+    text = " ".join(str(w.get("w", "")).strip() for w in near if str(w.get("w", "")).strip())
+    if not text:
+        text = " ".join(x for x in (clip.get("hook", ""), clip.get("title", ""), clip.get("description", ""),
+                                      clip.get("reason", "")) if x)
+    if not text.strip():
+        raise ValueError("This older clip has no saved transcript or post text to rewrite.")
+    direction = job.get("direction") or ""
+    if job.get("creator"):
+        direction = (creators.get(job["creator"]) or {}).get("clip_prompt") or direction
+    usage.set_context(job.get("creator"), job.get("title") or "Existing clip")
+    fresh = brain.describe(text, job.get("title") or "", job.get("uploader") or "", game=job.get("game"),
+                           timeout=config.AI_TIMEOUT, direction=direction)
+    brand = brain._brand_block()
+    unique_description = fresh.get("description", "")
+    if brand and unique_description.endswith(brand):
+        unique_description = unique_description[:-len(brand)].strip()
+    if not fresh.get("title") or not unique_description:
+        raise RuntimeError("The AI did not return new post text. Check Settings, AI, then try again.")
+    with _lock:
+        clip.update(title=fresh["title"], description=fresh["description"],
+                    hashtags=fresh.get("hashtags") or clip.get("hashtags") or [])
+        _write_post_text(job, clip)
+    save(job)
+    return job
 
 
 def render_one(job, clip, words):
@@ -385,8 +439,7 @@ def render_one(job, clip, words):
         near = _caption_words(job, clip, words, off) if clip.get("captions", True) else []
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
-        post = {k: clip[k] for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
-        (d / "clips" / f"{clip['id']}.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
+        _write_post_text(job, clip)
         if clip["version"] == 1:
             clip.setdefault("made_at", time.time())
             creators.log(job["creator"], f"Clip ready (score {clip['score']}): {clip['title'] or clip['hook']}")
@@ -561,6 +614,12 @@ def _run_job(job):
         game = games.detect(job["title"], src.get("name"))[0] or ""
     if game and job.get("game") != game:
         job["game"] = game
+    direction = job.get("direction") or ""
+    if job.get("creator"):
+        try:
+            direction = (creators.get(job["creator"]) or {}).get("clip_prompt") or direction
+        except Exception:  # noqa: BLE001
+            pass
     t0 = time.time()
     notes = []
     face = False       # where the webcam is in the source, found once; False means not looked for yet
@@ -735,12 +794,16 @@ def _run_job(job):
             continue
         quota = max(1, math.ceil(left / (len(blocks) - bi)))
         s0 = int((a - lo) / 16000)
-        found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append, game=game)
-        tokens += ai.get("tokens", 0)
-        model = ai.get("model") or model
-        if ai.get("note"):
-            notes.append(ai["note"])
+        use_vision = bool(ai.current().get("vision_model"))
+        candidate_quota = min(20, max(quota, quota * 2)) if use_vision else quota
+        found, ai_info = brain.find_clips(
+            bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
+            job["uploader"], candidate_quota, int(o["min_len"]), int(o["max_len"]), notes.append,
+            game=game, direction=direction)
+        tokens += ai_info.get("tokens", 0)
+        model = ai_info.get("model") or model
+        if ai_info.get("note"):
+            notes.append(ai_info["note"])
         if found and statics:
             # A commercial or a "be right back" slate is not a clip. Any clip that sits mostly inside one
             # is dropped.
@@ -753,6 +816,26 @@ def _run_job(job):
                 else:
                     keep.append(c)
             found = keep
+        # The transcript remains the main judge. A picture-capable model sees three frames from the strongest
+        # candidates and can give a modest boost to visible affection, joy, shock, rage or tension. Any failure
+        # simply leaves the original candidate untouched.
+        if found and use_vision and int(job.get("visual_reviews", 0)) < 6:
+            visual_path = job.get("source_path")
+            if not visual_path and src["type"] == "url" and not pieces:
+                visual_path = whole_video()
+            if visual_path and Path(visual_path).is_file():
+                remaining = 6 - int(job.get("visual_reviews", 0))
+                for c in sorted(found, key=lambda x: -int(x.get("score") or 0))[:remaining]:
+                    try:
+                        result = vision.review(visual_path, c["start"] + shift, c["end"] + shift,
+                                               timeout=config.AI_TIMEOUT)
+                        vision.apply(c, result)
+                    except Exception as e:  # noqa: BLE001
+                        notes.append("Visual review skipped: " + str(e)[-100:])
+                    job["visual_reviews"] = int(job.get("visual_reviews", 0)) + 1
+        if len(found) > quota:
+            found = sorted(found, key=lambda x: -int(x.get("score") or 0))[:quota]
+            found.sort(key=lambda x: x["start"])
         for c in found:
             c.update(id=f"clip{len(job['clips']) + 1:02d}", start=round(c["start"] + shift, 2),
                      end=round(c["end"] + shift, 2), style=o["style"], layout=o["layout"],

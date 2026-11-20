@@ -29,7 +29,7 @@ PROVIDERS = {
     "groq": ("Groq", "https://api.groq.com/openai/v1", "openai", "https://console.groq.com/keys", "llama-3.3-70b-versatile"),
     "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openai", "https://openrouter.ai/keys", "google/gemini-2.5-flash"),
     "anthropic": ("Claude", "https://api.anthropic.com/v1", "anthropic", "https://console.anthropic.com", ""),
-    "ollama": ("Ollama (on this machine)", "http://127.0.0.1:11434/v1", "openai", "https://ollama.com", "llama3.1"),
+    "ollama": ("Ollama (on this machine)", "http://127.0.0.1:11434/v1", "ollama", "https://ollama.com", "qwen3.5:4b"),
     "custom": ("Custom (OpenAI-compatible)", "", "openai", "", ""),
 }
 ALIASES = {"google": "gemini", "grok": "xai", "claude": "anthropic", "local": "ollama"}
@@ -66,6 +66,7 @@ def current() -> dict:
     p = str(d.get("provider") or config.AI_PROVIDER or "").strip().lower()
     return {"provider": ALIASES.get(p, p),
             "models": list(d["models"]) if d.get("provider") else list(config.AI_MODELS),
+            "vision_model": (str(d.get("vision_model") or "") if d.get("provider") else config.AI_VISION_MODEL).strip(),
             "base_url": (str(d.get("base_url") or "") if d.get("provider") else config.AI_BASE_URL).rstrip("/"),
             "key": str(d["key"]) if d.get("provider") and "key" in d else config.ai_key()}
 
@@ -76,6 +77,12 @@ def provider() -> str:
 
 def models() -> list:
     return current()["models"]
+
+
+def vision_model() -> str:
+    """The model shown pictures. Empty means the primary model, preserving older settings."""
+    c = current()
+    return c["vision_model"] or (c["models"][0] if c["models"] else "")
 
 
 def key() -> str:
@@ -91,6 +98,12 @@ def base_url() -> str:
     return c["base_url"] or PROVIDERS.get(c["provider"], ("", ""))[1]
 
 
+def _ollama_root() -> str:
+    """The native Ollama address, whether the saved address includes its OpenAI-compatible /v1 suffix or not."""
+    base = base_url().rstrip("/")
+    return base[:-3] if base.lower().endswith("/v1") else base
+
+
 def ready() -> bool:
     c = current()
     return bool(c["provider"] in PROVIDERS and c["models"] and base_url() and (c["key"] or c["provider"] in NO_KEY))
@@ -100,14 +113,15 @@ def public() -> dict:
     """What the settings page may see. The key itself never leaves the server: only whether there is one, and
     its last four characters so the owner can tell which key it is."""
     c = current()
-    return {"provider": c["provider"], "models": c["models"], "base_url": c["base_url"], "has_key": bool(c["key"]),
+    return {"provider": c["provider"], "models": c["models"], "vision_model": c["vision_model"],
+            "base_url": c["base_url"], "has_key": bool(c["key"]),
             "key_hint": c["key"][-4:] if len(c["key"]) >= 12 else "", "ready": ready(), "label": label(),
             "saved_here": bool(_from_dashboard().get("provider")),
             "providers": [{"id": k, "label": v[0], "address": v[1], "needs_key": k not in NO_KEY, "key_url": v[3], "example": v[4]}
                           for k, v in PROVIDERS.items()]}
 
 
-def save(provider_id: str, model_ids, address: str = "", new_key=None) -> dict:
+def save(provider_id: str, model_ids, address: str = "", new_key=None, vision_model_id=None) -> dict:
     """Save the choice made in the dashboard. `new_key` None keeps the key that is already there (the page never
     has it to send back); an empty string removes it."""
     p = ALIASES.get(str(provider_id or "").strip().lower(), str(provider_id or "").strip().lower())
@@ -120,6 +134,9 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None) -> dict:
         raise ValueError("Enter the model to use.")
     if any(not re.fullmatch(r"[\w.\-:/@]+", m) for m in ms):
         raise ValueError("A model id has letters, digits and . - : / only.")
+    vm = str(vision_model_id or "").strip()[:120]
+    if vm and not re.fullmatch(r"[\w.\-:/@]+", vm):
+        raise ValueError("A vision model id has letters, digits and . - : / only.")
     address = str(address or "").strip().rstrip("/")[:300]
     if address and not re.fullmatch(r"https?://[^\s]+", address):
         raise ValueError("The address has to start with http:// or https://")
@@ -132,7 +149,8 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None) -> dict:
     with _lock:
         f = _file()
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"provider": p, "models": ms, "base_url": address, "key": k}), encoding="utf-8")
+        tmp.write_text(json.dumps({"provider": p, "models": ms, "vision_model": vm,
+                                   "base_url": address, "key": k}), encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)        # the key is only for whoever runs the server
         except OSError:
@@ -157,6 +175,9 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
         r = httpx.get(base, params={"pageSize": 200}, headers={"x-goog-api-key": k}, timeout=20)
     elif how == "anthropic":
         r = httpx.get(f"{base}/models", params={"limit": 200}, headers={"x-api-key": k, "anthropic-version": "2023-06-01"}, timeout=20)
+    elif how == "ollama":
+        root = base[:-3] if base.lower().endswith("/v1") else base
+        r = httpx.get(f"{root}/api/tags", timeout=20)
     else:
         r = httpx.get(f"{base}/models", headers={"Authorization": f"Bearer {k}"} if k else {}, timeout=20)
     if r.status_code != 200:
@@ -165,6 +186,8 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
     if how == "gemini":
         found = [m.get("name", "").split("/")[-1] for m in data.get("models", [])
                  if "generateContent" in (m.get("supportedGenerationMethods") or [])]
+    elif how == "ollama":
+        found = [m.get("name") or m.get("model", "") for m in data.get("models", []) if isinstance(m, dict)]
     else:
         found = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
     return sorted({m for m in found if m})[:400]
@@ -196,7 +219,12 @@ def explain(e) -> str:
         return f"{label()} refused the key. Paste a working key under Settings, AI."
     if "429" in text or "quota" in low or "rate limit" in low or "exhausted" in low:
         return f"{label()} says the key has hit its limit or has no credit left. Check the account with {label()}, or try again later."
-    if "connect" in low or "timed out" in low or "timeout" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolutionerror" in low or "name resolution" in low:
+    if "timed out" in low or "timeout" in low:
+        if provider() == "ollama":
+            return ("Ollama took too long to answer. The model may still be loading or may be too large for this "
+                    "computer. Try again once; if it repeats, choose a smaller model.")
+        return f"{label()} took too long to answer. Try again."
+    if "connect" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolutionerror" in low or "name resolution" in low:
         return f"PeakCut couldn't reach {label()}. Check the internet connection" + (" and that Ollama is running." if provider() == "ollama" else ".")
     return ""
 
@@ -298,7 +326,7 @@ def call(model: str, prompt: str, schema: dict, timeout: float | None = None):
     `timeout` is how long one answer may take. A live stream passes a short one, because a slow
     answer must not stop the recording."""
     how = PROVIDERS[provider()][2]
-    return {"gemini": _gemini, "openai": _openai, "anthropic": _anthropic}[how](model, prompt, schema, timeout)
+    return {"gemini": _gemini, "openai": _openai, "anthropic": _anthropic, "ollama": _ollama}[how](model, prompt, schema, timeout)
 
 
 def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, int, int]:
@@ -307,9 +335,9 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
     Nothing is broken by a service that cannot look at pictures, or a model that is only text: the answer
     comes back empty, or says something the caller does not understand, and the caller carries on without
     it. The picture is a JPEG, passed as base64 inside the ordinary message."""
-    if not ready() or not image or not models():
+    if not ready() or not image or not vision_model():
         return "", 0, 0
-    model = models()[0]
+    model = vision_model()
     b64 = base64.b64encode(image).decode()
     how = PROVIDERS[provider()][2]
     if how == "gemini":
@@ -317,7 +345,7 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
             {"text": prompt},
             {"inline_data": {"mimeType": "image/jpeg", "data": b64}}]}]}
         r = httpx.post(f"{base_url()}/{model}:generateContent", json=body,
-                       headers={"x-goog-api-key": key()}, timeout=timeout or 120)
+                       headers={"x-goog-api-key": key()}, timeout=timeout or config.AI_TIMEOUT)
         if r.status_code != 200:
             _fail(r, model)
         data = r.json()
@@ -329,7 +357,7 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
         body = {"model": model, "max_tokens": 300, "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
             {"type": "text", "text": prompt}]}]}
-        r = httpx.post(f"{base_url()}/messages", json=body, timeout=timeout or 120,
+        r = httpx.post(f"{base_url()}/messages", json=body, timeout=timeout or config.AI_TIMEOUT,
                        headers={"x-api-key": key(), "anthropic-version": "2023-06-01"})
         if r.status_code != 200:
             _fail(r, model)
@@ -337,11 +365,22 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
         text = "".join(p.get("text", "") for p in data.get("content") or [] if p.get("type") == "text")
         u = data.get("usage") or {}
         return text, int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+    if how == "ollama":
+        body = {"model": model, "stream": False, "think": config.OLLAMA_THINK,
+                "keep_alive": config.OLLAMA_KEEP_ALIVE,
+                "options": {"temperature": 0.2, "num_ctx": config.OLLAMA_CONTEXT, "num_predict": 300},
+                "messages": [{"role": "user", "content": prompt, "images": [b64]}]}
+        r = httpx.post(f"{_ollama_root()}/api/chat", json=body, timeout=timeout or config.AI_TIMEOUT)
+        if r.status_code != 200:
+            _fail(r, model)
+        data = r.json()
+        return (str((data.get("message") or {}).get("content") or ""),
+                int(data.get("prompt_eval_count") or 0), int(data.get("eval_count") or 0))
     headers = {"Authorization": f"Bearer {key()}"} if key() else {}
     body = {"model": model, "stream": False, "messages": [{"role": "user", "content": [
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]}
-    r = httpx.post(f"{base_url()}/chat/completions", json=body, headers=headers, timeout=timeout or 120)
+    r = httpx.post(f"{base_url()}/chat/completions", json=body, headers=headers, timeout=timeout or config.AI_TIMEOUT)
     if r.status_code != 200:
         _fail(r, model)
     data = _openai_body(r)
@@ -353,7 +392,7 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
 def _gemini(model, prompt, schema, timeout=None):
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json", "responseSchema": schema}}
-    r = httpx.post(f"{base_url()}/{model}:generateContent", json=body, headers={"x-goog-api-key": key()}, timeout=timeout or 120)
+    r = httpx.post(f"{base_url()}/{model}:generateContent", json=body, headers={"x-goog-api-key": key()}, timeout=timeout or config.AI_TIMEOUT)
     if r.status_code != 200:
         _fail(r, model)
     data = r.json()
@@ -421,7 +460,8 @@ def _openai(model, prompt, schema, timeout=None):
     extras = [{"temperature": 0.4, "response_format": {"type": "json_object"}}, {"response_format": {"type": "json_object"}}, {}]
     r = None
     for extra in extras:
-        r = httpx.post(f"{base_url()}/chat/completions", json={**body, **extra}, headers=headers, timeout=timeout or 180)
+        r = httpx.post(f"{base_url()}/chat/completions", json={**body, **extra}, headers=headers,
+                       timeout=timeout or config.AI_TIMEOUT)
         if r.status_code not in (400, 422):
             break
     if r.status_code != 200:
@@ -433,7 +473,7 @@ def _openai(model, prompt, schema, timeout=None):
 
 def _anthropic(model, prompt, schema, timeout=None):
     body = {"model": model, "max_tokens": 8192, "messages": [{"role": "user", "content": _wrapped(prompt, schema)}]}
-    r = httpx.post(f"{base_url()}/messages", json=body, timeout=timeout or 180,
+    r = httpx.post(f"{base_url()}/messages", json=body, timeout=timeout or config.AI_TIMEOUT,
                    headers={"x-api-key": key(), "anthropic-version": "2023-06-01"})
     if r.status_code != 200:
         _fail(r, model)
@@ -441,3 +481,24 @@ def _anthropic(model, prompt, schema, timeout=None):
     text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
     u = data.get("usage") or {}
     return _parse(text), int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+
+
+def _ollama(model, prompt, schema, timeout=None):
+    """Use Ollama's native chat endpoint so local-only controls are explicit and repeatable.
+
+    Qwen thinking models can otherwise reason for minutes even for a tiny JSON answer. PeakCut needs bounded
+    structured answers, so thinking is off by default and can be opted into in .env. The native endpoint also
+    lets PeakCut choose a context size without changing Ollama globally for every other program.
+    """
+    wrapped = {"type": "object", "properties": {"items": _json_schema(schema)}, "required": ["items"]}
+    body = {"model": model, "stream": False, "think": config.OLLAMA_THINK, "format": wrapped,
+            "keep_alive": config.OLLAMA_KEEP_ALIVE,
+            "options": {"temperature": 0.4, "num_ctx": config.OLLAMA_CONTEXT,
+                        "num_predict": config.OLLAMA_MAX_OUTPUT},
+            "messages": [{"role": "user", "content": _wrapped(prompt, schema)}]}
+    r = httpx.post(f"{_ollama_root()}/api/chat", json=body, timeout=timeout or config.AI_TIMEOUT)
+    if r.status_code != 200:
+        _fail(r, model)
+    data = r.json()
+    text = str((data.get("message") or {}).get("content") or "")
+    return _parse(text), int(data.get("prompt_eval_count") or 0), int(data.get("eval_count") or 0)

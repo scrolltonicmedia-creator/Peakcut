@@ -102,7 +102,7 @@ def on_clip_ready(job, clip):
 
 def _caption(clip, creator):
     tags = " ".join("#" + h for h in clip.get("hashtags", []))
-    return "\n\n".join(x for x in (clip.get("description", ""), tags, creator.get("post_footer", "")) if x)
+    return "\n\n".join(x for x in (clip.get("description", ""), creator.get("post_footer", ""), tags) if x)
 
 
 def _post(p):
@@ -118,7 +118,9 @@ def _post(p):
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
         if acc["platform"] == "youtube":
-            rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), creator["privacy"])
+            if "shorts" not in {str(t).lower() for t in clip.get("hashtags", [])}:
+                cap += "\n\n#Shorts"
+            rid, url = accounts.youtube_upload(acc, path, title, cap, clip.get("hashtags", []), creator["privacy"])
         elif acc["platform"] == "instagram":
             rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"])
         elif acc["platform"] == "tiktok":

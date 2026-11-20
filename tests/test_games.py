@@ -5,7 +5,7 @@ Runs against the code directly, with its own empty data folder."""
 import os, sys, tempfile
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-games-")
 sys.path.insert(0, ".")
-from studio import brain, games, live
+from studio import brain, config, games, live
 fails = []
 def check(n, got, want=True):
     ok = want(got) if callable(want) else got == want
@@ -44,6 +44,19 @@ tidy = brain._tidy({"start": 1, "end": 9, "score": 80, "category": "clutch", "ho
 check("the game's tags are added to the post", "GTA6" in tidy["hashtags"], True)
 check("the AI's own tags are kept", "Gaming" in tidy["hashtags"] and "FPS" in tidy["hashtags"], True)
 check("the game's tags are not written twice", tidy["hashtags"].count("GTA6"), 1)
+check("every post carries the channel and format tags", all(x in tidy["hashtags"] for x in ("Shorts", "ScrollTonic", "GamingShorts")), True)
+check("a post never carries more than fifteen tags", len(brain._tidy({"hashtags": [f"tag{x}" for x in range(30)]}, 0, 1)["hashtags"]) <= 15, True)
+check("a title receives a relevant emoji when the model omitted one", tidy["title"].endswith("🔥"), True)
+check("paragraphs in a description are kept", "\n\n" in brain._tidy({"description": "First line.\n\nSecond line."}, 0, 1)["description"], True)
+formatted = brain._tidy({"category": "shock", "description": "First detail. Second detail. Was that lucky? Another question?"}, 0, 1)["description"]
+check("small-model descriptions become setup, payoff and one question", formatted.split("\n\n")[:3] == ["First detail.", "Second detail.", "Another question?"], True)
+old_brand = (config.BRAND_NAME, config.BRAND_TAGLINE, config.BRAND_YOUTUBE_URL, config.BRAND_INSTAGRAM_URL, config.BRAND_X_URL)
+config.BRAND_NAME, config.BRAND_TAGLINE = "Example", "daily moments."
+config.BRAND_YOUTUBE_URL, config.BRAND_INSTAGRAM_URL, config.BRAND_X_URL = "https://youtube.test/example", "", ""
+branded = brain._tidy({"description": "Watch https://fake.test and follow @wrong"}, 0, 1)["description"]
+check("the model cannot invent a link or handle", "fake.test" not in branded and "@wrong" not in branded, True)
+check("the real configured channel link is appended", "https://youtube.test/example" in branded, True)
+(config.BRAND_NAME, config.BRAND_TAGLINE, config.BRAND_YOUTUBE_URL, config.BRAND_INSTAGRAM_URL, config.BRAND_X_URL) = old_brand
 plain = brain._tidy({"start": 1, "end": 9, "score": 80, "category": "clutch", "hook": "x", "title": "t",
                      "description": "d", "hashtags": ["Gaming"], "highlight_words": []}, 1, 9)
 check("a stream with no game gets no game tags", "GTA6" in plain["hashtags"], False)

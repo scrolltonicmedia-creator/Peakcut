@@ -42,6 +42,9 @@ def fake_post(url, json=None, headers=None, timeout=None, **_k):  # noqa: A002
             return Reply(400, {"error": {"message": "temperature is not supported"}})
         return Reply(200, {"choices": [{"message": {"content": "```json\n" + globals()["json_text"]({"items": [CLIP]}) + "\n```"}}],
                            "usage": {"prompt_tokens": 90, "completion_tokens": 20}})
+    if url.endswith("/api/chat"):
+        return Reply(200, {"message": {"content": globals()["json_text"]({"items": [CLIP]})},
+                           "prompt_eval_count": 80, "eval_count": 15})
     if url.endswith("/messages"):
         return Reply(200, {"content": [{"type": "text", "text": "Here you go: " + globals()["json_text"]({"items": [CLIP]})}],
                            "usage": {"input_tokens": 70, "output_tokens": 10}})
@@ -92,7 +95,9 @@ os.environ["PEAKCUT_AI_KEY"] = ""
 config._kept.clear()
 check("ollama needs no key", ai.ready() and ai.label().startswith("Ollama"))
 out, _s, _w = ai.call("model-a", "hello", brain.SCHEMA)
-check("ollama: no key header is sent", "Authorization" not in seen[0][2] and out == [CLIP])
+check("ollama: native structured request needs no key and bounds local work",
+      seen[0][0].endswith("/api/chat") and "Authorization" not in seen[0][2] and out == [CLIP]
+      and seen[0][1]["think"] is False and seen[0][1]["options"]["num_ctx"] == config.OLLAMA_CONTEXT)
 use("gemini")
 check("gemini without a key is not ready", not ai.ready())
 os.environ["PEAKCUT_AI_KEY"] = "test-key-123456"

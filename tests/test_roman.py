@@ -55,7 +55,7 @@ check("an answer of the wrong length keeps the words, in Roman letters", text(br
 
 # ---- what the AI writes for the screen
 c = brain._tidy({"hook": "चूना लगा", "title": "उसको चूना", "highlight_words": ["चूना", "boss"], "score": 90}, 1, 20)
-check("hook, title and highlighted words are in Roman letters", (c["hook"], c["title"], c["highlight_words"]) == ("CHUNA LAGA", "usko chuna", ["chuna", "boss"]), str(c))
+check("hook, title and highlighted words are in Roman letters", (c["hook"], c["title"].removesuffix(" 🎮"), c["highlight_words"]) == ("CHUNA LAGA", "usko chuna", ["chuna", "boss"]), str(c))
 
 # ---- the language rule: English stays, Hindi/Urdu in Roman letters, everything else translated into English
 check("which languages are translated", [brain.needs_translation(x) for x in ("en", "en-US", "hi", "ur", "es", "ar", "")]

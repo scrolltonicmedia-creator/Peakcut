@@ -121,6 +121,19 @@ USERS_DIR = DATA_DIR / "users"          # users/<user id>/{creators,jobs,account
 MODELS_DIR = Path(env("PEAKCUT_MODELS") or DATA_DIR / "models")
 TMP_DIR = DATA_DIR / "tmp"
 FONTS_DIR = DATA_DIR / "fonts"          # caption fonts, copied from studio/fonts so every server renders the same
+# A PNG/JPEG placed here is burned into finished clips. It stays optional so a clean PeakCut install keeps its
+# original output, while a channel can brand every render simply by adding one file to its data folder.
+WATERMARK_FILE = Path(env("PEAKCUT_WATERMARK_FILE") or DATA_DIR / "watermark.png")
+WATERMARK_WIDTH = max(48, min(360, int(env("PEAKCUT_WATERMARK_WIDTH", "132"))))
+WATERMARK_OPACITY = max(0.05, min(1.0, float(env("PEAKCUT_WATERMARK_OPACITY", "0.48"))))
+WATERMARK_MARGIN = max(0, min(240, int(env("PEAKCUT_WATERMARK_MARGIN", "28"))))
+# Optional channel identity added to every generated post description. The AI writes only the unique copy for
+# each clip; fixed links come from settings so a model can never misspell or invent them.
+BRAND_NAME = env("PEAKCUT_BRAND_NAME", "").strip()[:80]
+BRAND_TAGLINE = env("PEAKCUT_BRAND_TAGLINE", "Daily clips, reactions and unforgettable moments.").strip()[:180]
+BRAND_YOUTUBE_URL = env("PEAKCUT_BRAND_YOUTUBE_URL", "").strip()[:300]
+BRAND_INSTAGRAM_URL = env("PEAKCUT_BRAND_INSTAGRAM_URL", "").strip()[:300]
+BRAND_X_URL = env("PEAKCUT_BRAND_X_URL", "").strip()[:300]
 # YouTube already has a word-by-word transcript of most videos. With this on, that is what the AI reads to find the
 # clips (seconds instead of transcribing hours), and our own model is run only on the clips themselves.
 YT_TRANSCRIPT = env("PEAKCUT_YT_TRANSCRIPT", "1") != "0"
@@ -195,7 +208,15 @@ ALLOWED_SITES = tuple(s.strip().lower() for s in env(
 # These are the starting values. Whatever is saved from the dashboard (Settings, AI) is used instead.
 AI_PROVIDER = env("PEAKCUT_AI_PROVIDER", "gemini").strip().lower()            # gemini, openai, xai, groq, openrouter, anthropic, ollama, custom
 AI_MODELS = [m.strip() for m in env("PEAKCUT_AI_MODELS", "").split(",") if m.strip()]   # tried in this order
+AI_VISION_MODEL = env("PEAKCUT_AI_VISION_MODEL", "").strip()[:120]                     # optional picture-capable model
 AI_BASE_URL = env("PEAKCUT_AI_BASE_URL", "").rstrip("/")                      # only for "custom", or to override a provider's address
+# Local models can take longer to load than cloud models take to answer. These bounds keep a mistyped setting from
+# making one request wait forever or asking Ollama to reserve more memory than a laptop can reasonably provide.
+AI_TIMEOUT = max(30.0, min(1800.0, float(env("PEAKCUT_AI_TIMEOUT", "300"))))
+OLLAMA_CONTEXT = max(2048, min(131072, int(env("PEAKCUT_OLLAMA_CONTEXT", "8192"))))
+OLLAMA_MAX_OUTPUT = max(256, min(16384, int(env("PEAKCUT_OLLAMA_MAX_OUTPUT_TOKENS", "4096"))))
+OLLAMA_KEEP_ALIVE = env("PEAKCUT_OLLAMA_KEEP_ALIVE", "10m").strip()[:30] or "10m"
+OLLAMA_THINK = env("PEAKCUT_OLLAMA_THINK", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def ai_key() -> str:

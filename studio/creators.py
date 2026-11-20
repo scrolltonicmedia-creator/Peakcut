@@ -17,7 +17,7 @@ _lock = threading.RLock()
 DEFAULTS = {"name": "", "channel": "", "style": "bounce", "layout": "blur", "captions": True, "min_len": 15, "max_len": 60,
             "max_clips": 6, "min_score": 80, "auto_watch": False, "buffer_min": 20, "live_per_hour": 4, "ai_every_min": 3, "ai_only_on_spike": True, "auto_jump_pct": 60,
             "plan": "free", "decide_mode": "both", "must_clip_min": 0, "min_gap_min": 2,
-            "game": "",
+            "game": "", "clip_prompt": "",
             "trigger_words": "clip that, clip it",
             "autopost": False, "accounts": [], "post_min_score": 75, "post_gap_min": 45, "daily_cap": 6,
             "privacy": "public", "post_footer": "", "rate_per_1k": 0.0, "channels": {}}
@@ -80,6 +80,10 @@ def _clean(data: dict) -> dict:
             v = v if v in ("both", "either") else "both"
         elif k == "privacy":
             v = v if v in ("public", "unlisted", "private") else "public"
+        elif k == "clip_prompt":
+            # This is deliberately longer than ordinary one-line settings: it is the creator's own editorial brief.
+            # Control characters and angle brackets are removed before it reaches an AI prompt as a second boundary.
+            v = re.sub(r"[\x00-\x1f\x7f]+", " ", str(v)).replace("<", "").replace(">", "").strip()[:1200]
         else:
             v = str(v).strip()[:300]
         out[k] = v

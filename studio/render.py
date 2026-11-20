@@ -292,9 +292,19 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
     (work / "f").mkdir()
     for f in config.FONTS_DIR.glob("*.ttf"):
         shutil.copyfile(f, work / "f" / f.name)
-    fc = _filter(layout, fg_h, face) + f"[v0]ass={name}.ass:fontsdir=f[v]"
-    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
-            "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+    watermark = config.WATERMARK_FILE if config.WATERMARK_FILE.is_file() else None
+    fc = _filter(layout, fg_h, face)
+    if watermark:
+        fc += (f"[1:v]format=rgba,colorchannelmixer=aa={config.WATERMARK_OPACITY:.3f},"
+               f"scale={config.WATERMARK_WIDTH}:-1[wm];"
+               f"[v0][wm]overlay=W-w-{config.WATERMARK_MARGIN}:H-h-{config.WATERMARK_MARGIN}:shortest=1[v1];"
+               f"[v1]ass={name}.ass:fontsdir=f[v]")
+    else:
+        fc += f"[v0]ass={name}.ass:fontsdir=f[v]"
+    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src)]
+    if watermark:
+        base += ["-loop", "1", "-i", str(watermark)]
+    base += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
     encoders = []
     if _qsv_ok is not False:
