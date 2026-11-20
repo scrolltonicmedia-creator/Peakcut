@@ -610,6 +610,9 @@ dialog::backdrop{background:rgba(14,12,11,.42);animation:fadein .16s ease}
 .editor .panel{padding:22px;overflow:auto;display:flex;flex-direction:column;gap:14px}
 .editor h3{font-size:13px;font-weight:600;color:var(--dim);margin-top:6px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.trim-tools{border:1px solid var(--line);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:9px;background:var(--muted)}
+.trim-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px}.trim-head b{color:var(--brand-ink)}
+.trim-tools .row{gap:6px}.trim-tools .btn{height:34px;padding:0 11px;font-size:12px}
 #toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:50}
 .toast{background:var(--frame);color:var(--frame-text);border:1px solid var(--frame-2);border-radius:var(--r);padding:12px 16px;max-width:380px;animation:rise .2s ease;display:flex;gap:10px;align-items:center;font-weight:500}
 .toast::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--brand);flex:none}
@@ -2164,6 +2167,15 @@ async function saveSettings() { const d = {}; $$("#sform [data-s]").forEach(i =>
 
 /* ============================================================ clip editor */
 function openClip(jid, cid) { D.jid = jid; D.cid = cid; D.sig = ""; drawClipDlg(true); $("#clipdlg").showModal(); }
+function updateClipLength() {
+  const start = Number($("#clipdlg [data-f=start]")?.value), end = Number($("#clipdlg [data-f=end]")?.value);
+  const seconds = end - start, label = $("#trimlen"), note = $("#trimnote"), fit = $("#trim60");
+  if (!label || !Number.isFinite(seconds)) return;
+  label.textContent = `${Math.max(0, seconds).toFixed(1)} seconds`;
+  const over = Math.max(0, seconds - 60);
+  note.textContent = over > 0 ? `${over.toFixed(1)}s over the 60-second target` : "Ready for a 60-second maximum";
+  if (fit) { fit.disabled = over <= 0; fit.textContent = over > 0 ? `Fit to 60s (cut ${over.toFixed(1)}s)` : "Already 60s or less"; }
+}
 function drawClipDlg(full) {
   const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid), dlg = $("#clipdlg");
   if (!c) { if (dlg.open) dlg.close(); return; }
@@ -2183,6 +2195,9 @@ function drawClipDlg(full) {
           <label class="f">Layout<select data-f="layout">${opts(S.status.layouts, c.layout)}</select></label></div>
         <div class="two"><label class="f">Start (seconds)<input data-f="start" type="number" step="0.5" value="${c.start}"></label>
           <label class="f">End (seconds)<input data-f="end" type="number" step="0.5" value="${c.end}"></label></div>
+        <div class="trim-tools"><div class="trim-head"><b id="trimlen">${Math.max(0, Number(c.end) - Number(c.start)).toFixed(1)} seconds</b><span class="sub" id="trimnote"></span></div>
+          <div class="row"><button class="btn" data-act="trimend" data-sec="1">Cut 1s from end</button><button class="btn" data-act="trimend" data-sec="5">Cut 5s from end</button><button class="btn primary" id="trim60" data-act="trim60">Fit to 60s</button></div>
+          <small class="sub">Use Start above to cut the beginning. Then press Save and re-make clip.</small></div>
         <h3>Post text</h3>
         <label class="f">Title<input data-f="title" value="${esc(c.title)}"></label>
         <label class="f">Description<textarea data-f="description" rows="8" maxlength="2000">${esc(c.description)}</textarea></label>
@@ -2198,12 +2213,14 @@ function drawClipDlg(full) {
           ${c.status === "done" ? `<a class="btn" href="${m}${esc(c.file)}?download=1">${ic("down")}Download</a>` : ""}
           <button class="btn" data-act="copy" data-j="${j.id}" data-c="${esc(c.id)}">${ic("copy")}Copy post text</button></div>
       </div></div>`;
+    updateClipLength();
   } else if (D.sig !== sig) $("#stage").innerHTML = stage;
   D.sig = sig;
   put($("#dposts"), postPills(c));
 }
 $("#clipdlg").addEventListener("close", () => { $("#clipdlg").innerHTML = ""; D.jid = null; });
 $("#clipdlg").addEventListener("click", e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+$("#clipdlg").addEventListener("input", e => { if (e.target.matches("[data-f=start],[data-f=end]")) updateClipLength(); });
 
 /* ============================================================ render + polling */
 function render() {
@@ -2509,6 +2526,15 @@ document.addEventListener("click", async e => {
       const fresh = await send(`/api/jobs/${D.jid}/clips/${D.cid}/rewrite`);
       const at = S.jobs.findIndex(j => j.id === fresh.id); if (at >= 0) S.jobs[at] = fresh;
       drawClipDlg(true); toast("Post text updated", "ok"); return;
+    }
+    if (a === "trim60" || a === "trimend") {
+      const start = $("#clipdlg [data-f=start]"), end = $("#clipdlg [data-f=end]");
+      const s = Number(start.value), oldEnd = Number(end.value);
+      if (!Number.isFinite(s) || !Number.isFinite(oldEnd) || oldEnd <= s) return toast("Check the start and end times.", "bad");
+      const next = a === "trim60" ? Math.min(oldEnd, s + 60) : Math.max(s + 3, oldEnd - Number(d.sec || 0));
+      if (next >= oldEnd) return toast("This clip is already 60 seconds or less.");
+      end.value = next.toFixed(2); updateClipLength();
+      toast(`${(oldEnd - next).toFixed(1)} seconds removed from the end. Press Save and re-make clip.`, "ok"); return;
     }
     if (a === "remake") {
       const body = {}; $$("#clipdlg [data-f]").forEach(i => {
