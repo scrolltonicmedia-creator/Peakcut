@@ -14,7 +14,7 @@ def check(n, got, want=True):
     ok = want(got) if callable(want) else got == want
     print(("PASS " if ok else "FAIL ") + n + ("" if ok else f"   got {got!r}")); ok or fails.append(n)
 
-check("five videos at once", config.MAX_ACTIVE_JOBS_PER_USER, 5)
+check("twelve videos at once", config.MAX_ACTIVE_JOBS_PER_USER, 12)
 check("no cap on recordings, video length, recording length, storage, uploads or creators",
       all(x >= 10 ** 6 for x in (config.MAX_LIVE_PER_USER, config.MAX_VIDEO_HOURS, config.MAX_LIVE_HOURS, config.MAX_USER_GB,
                                  config.MAX_UPLOAD_MB, config.MAX_CREATORS)))
